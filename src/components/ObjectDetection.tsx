@@ -3,8 +3,11 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Camera, Square, Zap, Cpu } from 'lucide-react';
+import { Camera, Square, Zap, Cpu, AlertCircle, CheckCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { apiService, ApiDetection } from '@/services/api';
+import { captureFrameAsBase64 } from '@/utils/imageUtils';
+import { MODEL_CONFIG } from '@/config/model';
 
 interface Detection {
   label: string;
@@ -31,6 +34,7 @@ const ObjectDetection = () => {
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [modelStats, setModelStats] = useState<ModelStats>({
     fps: 0,
@@ -38,25 +42,37 @@ const ObjectDetection = () => {
     detectionsCount: 0
   });
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [backendStatus, setBackendStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
 
-  // Placeholder for model - in real implementation you'd load your model.json here
+  // Check backend health and load model
   const loadModel = useCallback(async () => {
     setIsModelLoading(true);
+    setBackendStatus('connecting');
+    
     try {
-      // Simulate model loading - replace with actual model loading
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Check backend health
+      const healthData = await apiService.healthCheck();
+      setBackendStatus('connected');
       
-      toast({
-        title: "Model Loaded Successfully",
-        description: "YOLOv8 model is ready for object detection",
-      });
-      
-      setIsModelLoaded(true);
+      if (healthData.model_loaded) {
+        setIsModelLoaded(true);
+        toast({
+          title: "Model Loaded Successfully",
+          description: "YOLOv8 model is ready for object detection",
+        });
+      } else {
+        toast({
+          title: "Model Not Found",
+          description: "Please ensure your best.pt file is in the backend/models/ directory",
+          variant: "destructive",
+        });
+      }
     } catch (error) {
-      console.error('Error loading model:', error);
+      console.error('Error connecting to backend:', error);
+      setBackendStatus('error');
       toast({
-        title: "Model Loading Failed",
-        description: "Please check if your model files are accessible",
+        title: "Backend Connection Failed",
+        description: "Please ensure the Flask backend is running on port 5000",
         variant: "destructive",
       });
     } finally {
@@ -68,9 +84,9 @@ const ObjectDetection = () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'environment' // Use back camera on mobile
+          width: { ideal: MODEL_CONFIG.camera.width },
+          height: { ideal: MODEL_CONFIG.camera.height },
+          facingMode: MODEL_CONFIG.camera.facingMode
         }
       });
       
@@ -99,42 +115,56 @@ const ObjectDetection = () => {
       stream.getTracks().forEach(track => track.stop());
       setStream(null);
       setIsCameraActive(false);
+      setIsDetecting(false);
       setDetections([]);
     }
   }, [stream]);
 
-  // Simulate object detection - replace with actual YOLOv8 inference
+  // Real object detection using API
   const runDetection = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !isModelLoaded) return;
+    if (!videoRef.current || !canvasRef.current || !isModelLoaded || !isCameraActive) return;
 
+    setIsDetecting(true);
     const startTime = performance.now();
     
-    // Simulate detection results - replace with actual model inference
-    const mockDetections: Detection[] = [
-      {
-        label: 'person',
-        confidence: 0.85,
-        box: { x: 100, y: 50, width: 120, height: 200 }
-      },
-      {
-        label: 'phone',
-        confidence: 0.72,
-        box: { x: 300, y: 150, width: 80, height: 100 }
-      }
-    ];
+    try {
+      // Capture frame as base64
+      const imageBase64 = captureFrameAsBase64(videoRef.current);
+      
+      // Send to backend for detection
+      const apiDetections = await apiService.detectStream(
+        imageBase64,
+        MODEL_CONFIG.confidence_threshold,
+        MODEL_CONFIG.iou_threshold,
+        Date.now()
+      );
 
-    const inferenceTime = performance.now() - startTime;
-    
-    setDetections(mockDetections);
-    setModelStats(prev => ({
-      fps: Math.round(1000 / (performance.now() - startTime)),
-      inferenceTime: Math.round(inferenceTime),
-      detectionsCount: mockDetections.length
-    }));
+      // Convert API detections to frontend format
+      const frontendDetections: Detection[] = apiDetections.map((det: ApiDetection) => ({
+        label: det.label,
+        confidence: det.confidence,
+        box: det.box
+      }));
 
-    // Draw bounding boxes
-    drawDetections(mockDetections);
-  }, [isModelLoaded]);
+      const inferenceTime = performance.now() - startTime;
+      
+      setDetections(frontendDetections);
+      setModelStats(prev => ({
+        fps: Math.round(1000 / inferenceTime),
+        inferenceTime: Math.round(inferenceTime),
+        detectionsCount: frontendDetections.length
+      }));
+
+      // Draw bounding boxes
+      drawDetections(frontendDetections);
+      
+    } catch (error) {
+      console.error('Detection failed:', error);
+      // Don't show toast for every failed detection to avoid spam
+    } finally {
+      setIsDetecting(false);
+    }
+  }, [isModelLoaded, isCameraActive]);
 
   const drawDetections = (detections: Detection[]) => {
     const canvas = canvasRef.current;
@@ -171,7 +201,7 @@ const ObjectDetection = () => {
   useEffect(() => {
     if (!isCameraActive || !isModelLoaded) return;
 
-    const interval = setInterval(runDetection, 100); // 10 FPS
+    const interval = setInterval(runDetection, 1000 / MODEL_CONFIG.camera.fps);
     return () => clearInterval(interval);
   }, [isCameraActive, isModelLoaded, runDetection]);
 
@@ -191,6 +221,11 @@ const ObjectDetection = () => {
     }
   }, []);
 
+  // Auto-load model on component mount
+  useEffect(() => {
+    loadModel();
+  }, [loadModel]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-4">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -201,6 +236,28 @@ const ObjectDetection = () => {
             YOLOv8 Object Detection
           </h1>
           <p className="text-slate-300">Real-time object detection using your trained model</p>
+          
+          {/* Backend Status */}
+          <div className="flex items-center justify-center gap-2">
+            {backendStatus === 'connecting' && (
+              <>
+                <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
+                <span className="text-yellow-400 text-sm">Connecting to backend...</span>
+              </>
+            )}
+            {backendStatus === 'connected' && (
+              <>
+                <CheckCircle className="w-4 h-4 text-green-400" />
+                <span className="text-green-400 text-sm">Backend connected</span>
+              </>
+            )}
+            {backendStatus === 'error' && (
+              <>
+                <AlertCircle className="w-4 h-4 text-red-400" />
+                <span className="text-red-400 text-sm">Backend connection failed</span>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Stats Cards */}
@@ -263,6 +320,12 @@ const ObjectDetection = () => {
                     </div>
                   </div>
                 )}
+                
+                {isDetecting && (
+                  <div className="absolute top-2 right-2 bg-blue-500/80 text-white px-2 py-1 rounded text-sm">
+                    Detecting...
+                  </div>
+                )}
               </div>
             </Card>
           </div>
@@ -275,16 +338,17 @@ const ObjectDetection = () => {
               <div className="space-y-3">
                 <Button
                   onClick={loadModel}
-                  disabled={isModelLoading || isModelLoaded}
+                  disabled={isModelLoading || (isModelLoaded && backendStatus === 'connected')}
                   className="w-full"
-                  variant={isModelLoaded ? "secondary" : "default"}
+                  variant={isModelLoaded && backendStatus === 'connected' ? "secondary" : "default"}
                 >
-                  {isModelLoading ? "Loading Model..." : isModelLoaded ? "Model Loaded" : "Load Model"}
+                  {isModelLoading ? "Connecting..." : 
+                   isModelLoaded && backendStatus === 'connected' ? "Model Ready" : "Connect to Backend"}
                 </Button>
                 
                 <Button
                   onClick={isCameraActive ? stopCamera : startCamera}
-                  disabled={!isModelLoaded}
+                  disabled={!isModelLoaded || backendStatus !== 'connected'}
                   className="w-full"
                   variant={isCameraActive ? "destructive" : "default"}
                 >
@@ -317,19 +381,19 @@ const ObjectDetection = () => {
 
         {/* Instructions */}
         <Card className="bg-slate-800/50 border-slate-700 p-6">
-          <h3 className="text-xl font-semibold text-white mb-3">How to Use</h3>
+          <h3 className="text-xl font-semibold text-white mb-3">Setup Instructions</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-slate-300">
             <div className="text-center">
               <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-2 text-white font-bold">1</div>
-              <p>Load your YOLOv8 model (replace with your model.json path)</p>
+              <p>Place your best.pt file in backend/models/ directory</p>
             </div>
             <div className="text-center">
               <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-2 text-white font-bold">2</div>
-              <p>Grant camera permissions when prompted</p>
+              <p>Start the Flask backend server (python app.py)</p>
             </div>
             <div className="text-center">
               <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-2 text-white font-bold">3</div>
-              <p>Watch real-time object detection with bounding boxes</p>
+              <p>Grant camera permissions and start detection</p>
             </div>
           </div>
         </Card>
