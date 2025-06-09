@@ -11,9 +11,9 @@ export const captureFrameAsBase64 = (video: HTMLVideoElement): string => {
   
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   
-  // Convert to base64 (without the data:image/jpeg;base64, prefix)
+  // Convert to base64 (remove the data:image/jpeg;base64, prefix)
   const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-  return dataUrl;
+  return dataUrl.split(',')[1];
 };
 
 export const resizeImageForDetection = (imageBase64: string, maxWidth: number = 640): Promise<string> => {
@@ -47,6 +47,40 @@ export const resizeImageForDetection = (imageBase64: string, maxWidth: number = 
       resolve(canvas.toDataURL('image/jpeg', 0.8));
     };
     
-    img.src = imageBase64;
+    img.src = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  });
+};
+
+export const drawBoundingBoxes = (
+  canvas: HTMLCanvasElement,
+  detections: Array<{
+    label: string;
+    confidence: number;
+    bbox: [number, number, number, number];
+  }>
+) => {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  detections.forEach(detection => {
+    const [x1, y1, x2, y2] = detection.bbox;
+    const width = x2 - x1;
+    const height = y2 - y1;
+    
+    // Draw bounding box
+    ctx.strokeStyle = '#ff4444';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1, y1, width, height);
+    
+    // Draw label background
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(x1, y1 - 25, 150, 25);
+    
+    // Draw label text
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px Arial';
+    ctx.fillText(`${detection.label} ${(detection.confidence * 100).toFixed(1)}%`, x1 + 5, y1 - 8);
   });
 };

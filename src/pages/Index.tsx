@@ -1,8 +1,8 @@
 
-import ObjectDetection from "@/components/ObjectDetection";
+import WasteDetection from "@/components/WasteDetection";
 
 const Index = () => {
-  return <ObjectDetection />;
+  return <WasteDetection />;
 };
 
 export default Index;
