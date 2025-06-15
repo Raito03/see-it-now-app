@@ -5,15 +5,10 @@ export const captureFrameAsBase64 = (video: HTMLVideoElement): string => {
   canvas.height = video.videoHeight;
   
   const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Failed to get canvas context');
-  }
+  ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
   
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  
-  // Convert to base64 (remove the data:image/jpeg;base64, prefix)
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-  return dataUrl.split(',')[1];
+  // Return data URL without the prefix
+  return canvas.toDataURL('image/jpeg').split(',')[1];
 };
 
 export const resizeImageForDetection = (imageBase64: string, maxWidth: number = 640): Promise<string> => {

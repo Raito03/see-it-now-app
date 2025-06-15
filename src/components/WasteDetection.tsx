@@ -7,8 +7,48 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Camera, Upload, Video, History, Trash2, Play, Square, AlertCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useIsMobile } from '@/hooks/use-mobile';
-import { apiService, Detection, DetectionResult, HistoryItem } from '@/services/api';
+// import { apiService, Detection, DetectionResult, HistoryItem } from '@/services/api';
 import { captureFrameAsBase64 } from '@/utils/imageUtils';
+
+// Helper to convert base64 data URL to Blob
+const dataURLtoBlob = (dataurl: string) => {
+  const arr = dataurl.split(',');
+  const mime = arr[0].match(/:(.*?);/)![1];
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new Blob([u8arr], { type: mime });
+};
+
+const API_BASE = 'http://localhost:8000';
+
+// Define detection interface
+type Detection = {
+  class_name: string;          // matches API
+  confidence: number;
+  bbox: [number, number, number, number];
+}
+
+
+// API response for detection
+interface DetectionResult {
+  detections: Detection[];
+  processed_image?: string;    // matches back-end
+  annotated_image?: string;     // if you still want both
+  videoUrl?: string;
+}
+
+
+// History item from backend
+interface HistoryItem {
+  timestamp: string | number | Date;
+  id: string;
+  processed_image: string; // base64 JPEG
+  detections: Detection[];
+}
 
 const WasteDetection = () => {
   const { toast } = useToast();
@@ -36,67 +76,70 @@ const WasteDetection = () => {
 
   const loadHistory = async () => {
     try {
-      const historyData = await apiService.getHistory();
-      setHistory(historyData);
-    } catch (error) {
-      console.error('Failed to load history:', error);
+      const res = await fetch(`${API_BASE}/history?limit=50&offset=0`);
+      const data = await res.json();
+      setHistory(data.records as HistoryItem[]);
+    } catch (err) {
+      console.error(err);
     }
   };
 
+  // Start camera and set canvas dimensions once
   const startCamera = async () => {
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: isMobile ? 480 : 640 },
-          height: { ideal: isMobile ? 640 : 480 },
-          facingMode: isMobile ? 'environment' : 'user'
-        }
-      });
-      
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: isMobile ? 'environment' : 'user' } });
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
+        videoRef.current.play();
+        // Once metadata loaded, size canvas
+        videoRef.current.onloadedmetadata = () => {
+          if (canvasRef.current && videoRef.current) {
+            canvasRef.current.width = videoRef.current.videoWidth;
+            canvasRef.current.height = videoRef.current.videoHeight;
+          }
+        };
         setStream(mediaStream);
         setIsCameraActive(true);
-        
-        toast({
-          title: "Camera Started",
-          description: "Camera is ready for waste detection",
-        });
+        toast({ title: 'Camera Started', description: 'Camera is ready' });
       }
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      toast({
-        title: "Camera Access Denied",
-        description: "Please allow camera permissions",
-        variant: "destructive",
-      });
+    } catch {
+      toast({ title: 'Camera Access Denied', description: 'Allow permissions', variant: 'destructive' });
     }
   };
-
   const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-      setIsCameraActive(false);
-      setIsLiveDetecting(false);
-      setCurrentDetections([]);
+    stream?.getTracks().forEach(t => t.stop());
+    setStream(null);
+    setIsCameraActive(false);
+    setIsLiveDetecting(false);
+    setCurrentDetections([]);
+    // Clear canvas
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
   };
 
+  // Run detection but do not resize canvas repeatedly
   const runLiveDetection = useCallback(async () => {
-    if (!videoRef.current || !isCameraActive || isDetecting) return;
-
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !isCameraActive || isDetecting) return;
     setIsDetecting(true);
-    
     try {
-      const imageBase64 = captureFrameAsBase64(videoRef.current);
-      const result = await apiService.detectLive(imageBase64);
-      
-      setCurrentDetections(result.detections || []);
-      drawDetections(result.detections || []);
-      
-    } catch (error) {
-      console.error('Live detection failed:', error);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      // drawImage uses existing canvas size
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg');
+      const blob = dataURLtoBlob(dataUrl);
+      const form = new FormData(); form.append('file', blob, 'frame.jpg');
+      const res = await fetch(`${API_BASE}/detect`, { method: 'POST', body: form });
+      const result = (await res.json()) as DetectionResult;
+      setCurrentDetections(result.detections);
+      drawDetections(result.detections);
+      await loadHistory();
+    } catch (err) {
+      console.error(err);
     } finally {
       setIsDetecting(false);
     }
@@ -110,137 +153,70 @@ const WasteDetection = () => {
     return () => clearInterval(interval);
   }, [isLiveDetecting, isCameraActive, runLiveDetection]);
 
+  // Draw boxes overlay
   const drawDetections = (detections: Detection[]) => {
     const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    // clear only overlay, preserving video
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    detections.forEach(detection => {
-      const [x1, y1, x2, y2] = detection.bbox;
-      const width = x2 - x1;
-      const height = y2 - y1;
-      
-      // Scale coordinates to canvas size
-      const scaleX = canvas.width / video.videoWidth;
-      const scaleY = canvas.height / video.videoHeight;
-      
-      const scaledX = x1 * scaleX;
-      const scaledY = y1 * scaleY;
-      const scaledWidth = width * scaleX;
-      const scaledHeight = height * scaleY;
-      
-      // Draw bounding box
-      ctx.strokeStyle = '#ff4444';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
-      
-      // Draw label
-      ctx.fillStyle = '#ff4444';
-      ctx.fillRect(scaledX, scaledY - 25, 150, 25);
-      ctx.fillStyle = '#fff';
-      ctx.font = '14px Arial';
-      ctx.fillText(`${detection.label} ${(detection.confidence * 100).toFixed(1)}%`, scaledX + 5, scaledY - 8);
+    detections.forEach(d => {
+      const [x1, y1, x2, y2] = d.bbox;
+      const w = x2 - x1;
+      const h = y2 - y1;
+      ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 2;
+      ctx.strokeRect(x1, y1, w, h);
+      ctx.fillStyle = '#ff4444'; ctx.fillRect(x1, y1 - 20, 120, 20);
+      ctx.fillStyle = '#fff'; ctx.font = '12px Arial';
+      ctx.fillText(`${d.class_name} ${(d.confidence * 100).toFixed(1)}%`, x1 + 4, y1 - 6);
     });
   };
 
-  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
     setIsDetecting(true);
     try {
-      const result = await apiService.detectWithHistory(file);
+      const form = new FormData(); form.append('file', file);
+      const res = await fetch(`${API_BASE}/detect`, { method: 'POST', body: form });
+      const result = await res.json();
       setDetectionResult(result);
-      
-      // Create preview URL for the uploaded image
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setSelectedImage(e.target?.result as string);
-      };
+      const reader = new FileReader(); reader.onload = () => setSelectedImage(reader.result as string);
       reader.readAsDataURL(file);
-      
-      await loadHistory(); // Refresh history
-      
-      toast({
-        title: "Detection Complete",
-        description: `Found ${result.detections.length} waste objects`,
-      });
-    } catch (error) {
-      console.error('Image detection failed:', error);
-      toast({
-        title: "Detection Failed",
-        description: "Please try again",
-        variant: "destructive",
-      });
-    } finally {
-      setIsDetecting(false);
-    }
+      await loadHistory();
+      toast({ title: 'Detection Complete', description: `Found ${result.detections.length} objects` });
+    } catch {
+      toast({ title: 'Detection Failed', variant: 'destructive' });
+    } finally { setIsDetecting(false); }
   };
 
-  const handleVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
     if (!file) return;
-
     setIsDetecting(true);
     try {
-      const result = await apiService.detectVideo(file);
-      setDetectionResult(result);
-      
-      toast({
-        title: "Video Processing Complete",
-        description: `Detected waste objects in video`,
-      });
-    } catch (error) {
-      console.error('Video detection failed:', error);
-      toast({
-        title: "Video Processing Failed",
-        description: "Please try again",
-        variant: "destructive",
-      });
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(`${API_BASE}/video`, { method: 'POST', body: form });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setDetectionResult(prev => ({ detections: prev.detections, videoUrl: url }));
+      toast({ title: 'Video Processed' });
+    } catch {
+      toast({ title: 'Processing Failed', variant: 'destructive' });
     } finally {
       setIsDetecting(false);
     }
   };
 
   const deleteHistoryItem = async (id: string) => {
-    try {
-      await apiService.deleteHistoryItem(id);
-      await loadHistory();
-      toast({
-        title: "Item Deleted",
-        description: "History item removed successfully",
-      });
-    } catch (error) {
-      console.error('Failed to delete history item:', error);
-      toast({
-        title: "Delete Failed",
-        description: "Please try again",
-        variant: "destructive",
-      });
-    }
+    await fetch(`${API_BASE}/history-delete?detection_id=${id}`, { method: 'DELETE' });
+    await loadHistory();
+    toast({ title: 'Item Deleted' });
   };
-
   const clearAllHistory = async () => {
-    try {
-      await apiService.clearHistory();
-      await loadHistory();
-      toast({
-        title: "History Cleared",
-        description: "All history items removed",
-      });
-    } catch (error) {
-      console.error('Failed to clear history:', error);
-      toast({
-        title: "Clear Failed",
-        description: "Please try again",
-        variant: "destructive",
-      });
-    }
+    await fetch(`${API_BASE}/history-delete`, { method: 'DELETE' });
+    await loadHistory();
+    toast({ title: 'History Cleared' });
   };
 
   // Handle video loaded metadata
@@ -319,13 +295,13 @@ const WasteDetection = () => {
                   )}
                 </div>
 
-                <div className="relative">
+                <div className="relative w-full h-[65%]" style={{ paddingTop: '0' }}>
                   <video
                     ref={videoRef}
                     autoPlay
                     playsInline
                     muted
-                    className="w-full rounded-lg bg-black max-h-[60vh] object-contain"
+                    className="w-full rounded-lg top-0 left-0 h-full object-cover"
                   />
                   <canvas
                     ref={canvasRef}
@@ -355,7 +331,7 @@ const WasteDetection = () => {
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {currentDetections.map((detection, index) => (
                         <div key={index} className="flex items-center justify-between p-2 bg-gray-100 rounded">
-                          <span className="font-medium">{detection.label}</span>
+                          <span className="font-medium">{detection.class_name}</span>
                           <Badge variant="secondary">
                             {(detection.confidence * 100).toFixed(1)}%
                           </Badge>
@@ -406,7 +382,7 @@ const WasteDetection = () => {
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           {detectionResult.detections.map((detection, index) => (
                             <div key={index} className="flex items-center justify-between p-2 bg-gray-100 rounded">
-                              <span className="font-medium">{detection.label}</span>
+                              <span className="font-medium">{detection.class_name}</span>
                               <Badge variant="secondary">
                                 {(detection.confidence * 100).toFixed(1)}%
                               </Badge>
@@ -460,7 +436,7 @@ const WasteDetection = () => {
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           {detectionResult.detections.map((detection, index) => (
                             <div key={index} className="flex items-center justify-between p-2 bg-gray-100 rounded">
-                              <span className="font-medium">{detection.label}</span>
+                              <span className="font-medium">{detection.class_name}</span>
                               <Badge variant="secondary">
                                 {(detection.confidence * 100).toFixed(1)}%
                               </Badge>
@@ -530,7 +506,7 @@ const WasteDetection = () => {
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             {item.detections.map((detection, index) => (
                               <div key={index} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                                <span className="text-sm font-medium">{detection.label}</span>
+                                <span className="text-sm font-medium">{detection.class_name}</span>
                                 <Badge variant="outline" className="text-xs">
                                   {(detection.confidence * 100).toFixed(1)}%
                                 </Badge>

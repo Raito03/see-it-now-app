@@ -52,8 +52,8 @@ def detect_objects():
         image = decode_base64_image(data['image'])
         
         # Get optional parameters
-        confidence_threshold = data.get('confidence_threshold', 0.5)
-        iou_threshold = data.get('iou_threshold', 0.4)
+        confidence_threshold = data.get('confidence_threshold', 0.25)
+        iou_threshold = data.get('iou_threshold', 0.3)
         
         # Run detection
         detections = detector.detect(

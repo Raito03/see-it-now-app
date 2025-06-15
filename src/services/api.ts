@@ -64,13 +64,13 @@ class ApiService {
   }
 
   async detectLive(imageBase64: string): Promise<DetectionResult> {
-    const response = await fetch(`${this.baseUrl}/detect`, {
+    const response = await fetch(`${this.baseUrl}/detect/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        image_data: imageBase64,
+        image: imageBase64,
         save_to_history: false
       }),
     });
